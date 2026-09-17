@@ -800,8 +800,8 @@ mod tests {
     use super::{
         component_contains_glob, derive_glob_walk_root, edit_file, expand_braces, glob_search,
         grep_search, is_symlink_escape, normalize_for_comparison, read_file,
-        read_file_in_workspace, validate_workspace_boundary, write_file, write_file_in_workspace,
-        GrepSearchInput, MAX_WRITE_SIZE,
+        read_file_in_workspace, write_file, write_file_in_workspace, GrepSearchInput,
+        MAX_WRITE_SIZE,
     };
 
     fn temp_path(name: &str) -> std::path::PathBuf {
@@ -948,11 +948,13 @@ mod tests {
         );
     }
 
+    // Backslash-separated paths only parse into path components on Windows.
     #[test]
+    #[cfg(windows)]
     fn accepts_equivalent_extended_path_at_workspace_boundary() {
         let root = PathBuf::from(r"C:\workspace");
         let resolved = PathBuf::from(r"\\?\C:\workspace\src\main.rs");
-        validate_workspace_boundary(&resolved, &root)
+        super::validate_workspace_boundary(&resolved, &root)
             .expect("equivalent Windows path representations should be accepted");
     }
 
