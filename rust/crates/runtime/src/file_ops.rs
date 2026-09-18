@@ -40,19 +40,32 @@ fn is_binary_file(path: &Path) -> io::Result<bool> {
 /// the workspace boundary (e.g. via `../` traversal or symlink).
 #[allow(dead_code)]
 fn validate_workspace_boundary(resolved: &Path, workspace_root: &Path) -> io::Result<()> {
-    let resolved = normalize_for_comparison(resolved);
     let workspace_root = normalize_for_comparison(workspace_root);
-    if !resolved.starts_with(&workspace_root) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!(
-                "path {} escapes workspace boundary {}",
-                resolved.display(),
-                workspace_root.display()
-            ),
-        ));
+    let comparable = normalize_for_comparison(resolved);
+    if comparable.starts_with(&workspace_root) || resolves_within(resolved, &workspace_root) {
+        return Ok(());
     }
-    Ok(())
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "path {} escapes workspace boundary {}",
+            comparable.display(),
+            workspace_root.display()
+        ),
+    ))
+}
+
+/// Whether `resolved` names a location inside `workspace_root` once the
+/// filesystem resolves it. Windows accepts several spellings of one location
+/// that [`Path::starts_with`] treats as different: letter case (a working
+/// directory typed as `c:\users\...` for `C:\Users\...`), the `\\.\` device
+/// namespace, and 8.3 short names. Only consulted after the lexical comparison
+/// fails, so it can accept such a spelling but never widens what already
+/// compared inside, and a path whose canonical form is outside stays rejected.
+fn resolves_within(resolved: &Path, workspace_root: &Path) -> bool {
+    resolved
+        .canonicalize()
+        .is_ok_and(|canonical| normalize_for_comparison(&canonical).starts_with(workspace_root))
 }
 
 /// Text payload returned by file-reading operations.
@@ -956,6 +969,57 @@ mod tests {
         let resolved = PathBuf::from(r"\\?\C:\workspace\src\main.rs");
         super::validate_workspace_boundary(&resolved, &root)
             .expect("equivalent Windows path representations should be accepted");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn accepts_a_path_that_resolves_inside_the_workspace() {
+        let workspace = temp_path("boundary-alias-workspace");
+        let aliases = temp_path("boundary-alias-links");
+        std::fs::create_dir_all(workspace.join("src")).expect("workspace dir should be created");
+        std::fs::create_dir_all(&aliases).expect("alias dir should be created");
+        let alias = aliases.join("src");
+        std::os::unix::fs::symlink(workspace.join("src"), &alias).expect("symlink should create");
+        let root = workspace
+            .canonicalize()
+            .expect("workspace should canonicalize");
+
+        super::validate_workspace_boundary(&alias, &root)
+            .expect("a spelling that resolves inside the workspace should be accepted");
+        super::validate_workspace_boundary(&aliases, &root)
+            .expect_err("a path that resolves outside the workspace must stay rejected");
+
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&aliases);
+    }
+
+    // Windows resolves one location from spellings that compare unequal as
+    // paths, letter case and the `\\.\` device namespace among them.
+    #[test]
+    #[cfg(windows)]
+    fn accepts_other_windows_spellings_of_a_workspace_path() {
+        let workspace = temp_path("Boundary-Case-Workspace");
+        std::fs::create_dir_all(workspace.join("src")).expect("workspace dir should be created");
+        let root = workspace
+            .canonicalize()
+            .expect("workspace should canonicalize");
+
+        let lower = PathBuf::from(workspace.join("src").to_string_lossy().to_lowercase());
+        super::validate_workspace_boundary(&lower, &root)
+            .expect("a lower-cased spelling of a workspace path should be accepted");
+
+        let device = PathBuf::from(format!(r"\\.\{}", workspace.join("src").display()));
+        super::validate_workspace_boundary(&device, &root)
+            .expect("a device-namespace spelling of a workspace path should be accepted");
+
+        let parent = workspace
+            .parent()
+            .expect("workspace has a parent")
+            .to_path_buf();
+        super::validate_workspace_boundary(&parent, &root)
+            .expect_err("the workspace's parent must stay rejected");
+
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]
